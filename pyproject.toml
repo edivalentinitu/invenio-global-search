@@ -28,8 +28,8 @@ ignore = [
 [tool.mypy]
 ignore_missing_imports = true
 
-[tool.ty.src]
-root = "invenio_global_search"
+[tool.ty.environment]
+root = ["invenio_global_search"]
 
 [tool.ty.rules]
 unresolved-import = "ignore"
