@@ -19,6 +19,7 @@ from .serializers import (
     Marc21RecordJSONSerializer,
     RDMRecordJSONSerializer,
 )
+from .utils import schema_mapping
 
 type GlobalSearchSerializerType = type[
     LOMRecordJSONSerializer | Marc21RecordJSONSerializer | RDMRecordJSONSerializer
@@ -208,6 +209,31 @@ def create_update_global_search_record(
         current_app.logger.warning(msg, data["original"]["pid"], error)
 
 
+def create_update_global_search_record_many(
+    identity: Identity,
+    gs_data: list[dict],
+    schema: str,
+    uow: UnitOfWork | None = None,
+) -> None:
+    """Service call to create or update a batch of global search records."""
+    current_app.logger.info(
+        "Create or update batch global search records for schema %s",
+        schema,
+    )
+    result = current_records_global_search.records_service.create_or_update_batch(
+        identity=identity,
+        data=gs_data,
+        uow=uow,
+    )
+
+    for res in result.results:
+        if res.errors:
+            current_app.logger.warning(
+                "The following errors appeared for the bulk update %s",
+                res.errors,
+            )
+
+
 def map_metadata_from_a_to_b(
     record: Record,
     serializer_cls: GlobalSearchSerializerType,
@@ -230,21 +256,16 @@ def map_metadata_from_a_to_b(
     )
 
 
-def map_metadata_from_a_to_b_many(  # noqa: PLR0917
+def map_metadata_from_a_to_b_many(
     records: list[Record],
     serializer_cls: GlobalSearchSerializerType,
     schema: str,
-    identity: Identity,
+    schema_mapping: dict,
     metadata_cls: type[Marc21Metadata] | type[LOMMetadata] | None = None,
-    uow: UnitOfWork | None = None,
-) -> None:
+    *,
+    include_links: bool = True,
+) -> list[dict] | None:
     """Func."""
-    schema_mapping = {
-        "rdm": RDMRecordServiceConfig,
-        "lom": LOMRecordServiceConfig,
-        "marc21": Marc21RecordServiceConfig,
-    }
-
     record_serializer = serializer_cls()
 
     gs_data = []
@@ -255,6 +276,7 @@ def map_metadata_from_a_to_b_many(  # noqa: PLR0917
             schema,
             schema_mapping,
             metadata_cls,
+            include_links=include_links,
         )
         if data is None:
             continue
@@ -262,24 +284,9 @@ def map_metadata_from_a_to_b_many(  # noqa: PLR0917
 
     if not gs_data:
         current_app.logger.info("Empty global search batch after mapping")
-        return
+        return None
 
-    current_app.logger.info(
-        "Create or update batch global search records for schema %s",
-        schema,
-    )
-    result = current_records_global_search.records_service.create_or_update_batch(
-        identity=identity,
-        data=gs_data,
-        uow=uow,
-    )
-
-    for res in result.results:
-        if res.errors:
-            current_app.logger.warning(
-                "The following errors appeared for the bulk update %s",
-                res.errors,
-            )
+    return gs_data
 
 
 class ComponentOp(Operation):
@@ -309,11 +316,6 @@ class ComponentOp(Operation):
         _: UnitOfWork,
     ) -> None:
         """Post commit."""
-        schema_mapping = {
-            "rdm": RDMRecordServiceConfig,
-            "lom": LOMRecordServiceConfig,
-            "marc21": Marc21RecordServiceConfig,
-        }
         mapped_data = self._map_func(
             self._record,
             self._serializer_cls,
