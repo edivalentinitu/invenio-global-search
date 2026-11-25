@@ -148,6 +148,8 @@ def _get_gs_data(
     schema: str,
     schema_mapping: dict,
     metadata_cls: type[Marc21Metadata] | type[LOMMetadata] | None = None,
+    *,
+    include_links: bool = True,
 ) -> dict | None:
     data = record.dumps()
 
@@ -169,11 +171,13 @@ def _get_gs_data(
         current_app.logger.exception(msg, pid, schema)
         return None
 
-    service_config = schema_mapping[schema].build(current_app)
-    link = service_config.links_item["self_html"].expand(record, {})
+    link = None
+    if include_links:
+        service_config = schema_mapping[schema].build(current_app)
+        link = service_config.links_item["self_html"].expand(record, {})
 
     original = {
-        "view": link,
+        "view": link or f"{schema_mapping[schema]}/{pid}",
         "schema": schema,
         "pid": pid,
         "created": data["created"],
@@ -187,33 +191,12 @@ def _get_gs_data(
     }
 
 
-def map_metadata_from_a_to_b(  # noqa: PLR0917
-    record: Record,
-    serializer_cls: GlobalSearchSerializerType,
-    schema: str,
+def create_update_global_search_record(
     identity: Identity,
-    metadata_cls: type[Marc21Metadata] | type[LOMMetadata] | None = None,
+    data: dict,
     uow: UnitOfWork | None = None,
 ) -> None:
-    """Func."""
-    schema_mapping = {
-        "rdm": RDMRecordServiceConfig,
-        "lom": LOMRecordServiceConfig,
-        "marc21": Marc21RecordServiceConfig,
-    }
-    record_serializer = serializer_cls()
-
-    data = _get_gs_data(
-        record,
-        record_serializer,
-        schema,
-        schema_mapping,
-        metadata_cls,
-    )
-    if data is None:
-        return
-
-    pid = data["original"]["pid"]
+    """Service call to create or update a global search record."""
     try:
         current_records_global_search.records_service.create_or_update(
             identity=identity,
@@ -222,7 +205,29 @@ def map_metadata_from_a_to_b(  # noqa: PLR0917
         )
     except ValidationError as error:
         msg = "GLOBAL SEARCH pid: %s has following validation error: %s"
-        current_app.logger.warning(msg, pid, error)
+        current_app.logger.warning(msg, data["original"]["pid"], error)
+
+
+def map_metadata_from_a_to_b(
+    record: Record,
+    serializer_cls: GlobalSearchSerializerType,
+    schema: str,
+    schema_mapping: dict,
+    metadata_cls: type[Marc21Metadata] | type[LOMMetadata] | None = None,
+    *,
+    include_links: bool = True,
+) -> dict | None:
+    """Func."""
+    record_serializer = serializer_cls()
+
+    return _get_gs_data(
+        record,
+        record_serializer,
+        schema,
+        schema_mapping,
+        metadata_cls,
+        include_links=include_links,
+    )
 
 
 def map_metadata_from_a_to_b_many(  # noqa: PLR0917
@@ -284,14 +289,16 @@ class ComponentOp(Operation):
         self,
         record: Record,
         serializer_cls: GlobalSearchSerializerType,
-        func: Callable = map_metadata_from_a_to_b,
+        map_func: Callable = map_metadata_from_a_to_b,
+        create_update_func: Callable = create_update_global_search_record,
         metadata_cls: type[Marc21Metadata] | type[LOMMetadata] | None = None,
         schema: str | None = None,
         identity: Identity | None = None,
     ) -> None:
         """Construct."""
         self._record = record
-        self._func = func
+        self._map_func = map_func
+        self._create_update_func = create_update_func
         self._serializer_cls = serializer_cls
         self._metadata_cls = metadata_cls
         self._schema = schema
@@ -302,10 +309,17 @@ class ComponentOp(Operation):
         _: UnitOfWork,
     ) -> None:
         """Post commit."""
-        self._func(
+        schema_mapping = {
+            "rdm": RDMRecordServiceConfig,
+            "lom": LOMRecordServiceConfig,
+            "marc21": Marc21RecordServiceConfig,
+        }
+        mapped_data = self._map_func(
             self._record,
             self._serializer_cls,
             self._schema,
-            self._identity,
+            schema_mapping,
             self._metadata_cls,
         )
+        if mapped_data is not None:
+            self._create_update_func(self._identity, mapped_data)
